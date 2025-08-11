@@ -1,0 +1,380 @@
+import torch
+import pandas as pd
+import xgboost as xgb
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score, classification_report
+from imblearn.over_sampling import SMOTE
+from torch.utils.data import DataLoader, Dataset
+import joblib
+
+df=pd.read_excel("/content/personal finance data.xlsx")
+
+df.head()
+
+df.tail()
+
+df.columns
+
+# Data Cleaning & Preprocessing
+df = df.dropna(subset=["Mode", "Sub category", "Category"])  # Remove missing values
+df = df.drop_duplicates()  # Remove duplicate records
+df["Mode"] = df["Mode"].str.lower().str.strip()  # Normalize text
+df["Sub category"] = df["Sub category"].str.lower().str.strip()
+df["Category"] = df["Category"].str.lower().str.strip()
+
+df["text"] = df["Mode"] + " " + df["Sub category"]  # Combine mode & subcategory
+
+# Encode categories
+label_encoder = LabelEncoder()
+df["category_label"] = label_encoder.fit_transform(df["Category"])
+
+# TF-IDF Vectorization
+vectorizer = TfidfVectorizer(ngram_range=(1, 3), max_features=10000)
+X = vectorizer.fit_transform(df["text"])
+y = df["category_label"]
+
+from imblearn.over_sampling import RandomOverSampler
+
+oversampler = RandomOverSampler(random_state=42)
+X_resampled, y_resampled = oversampler.fit_resample(X, y)
+
+# Split Data
+X_train, X_test, y_train, y_test = train_test_split(X_resampled, y_resampled, test_size=0.2, stratify=y_resampled, random_state=42)
+
+# Train XGBoost Model with optimized parameters
+xgb_model = xgb.XGBClassifier(
+    objective="multi:softmax",
+    num_class=len(label_encoder.classes_),
+    eval_metric="mlogloss",
+    use_label_encoder=False,
+    learning_rate=0.1,
+    max_depth=8,
+    n_estimators=300,
+    subsample=0.8,
+    colsample_bytree=0.8
+)
+xgb_model.fit(X_train, y_train)
+
+# Model Evaluation
+y_pred = xgb_model.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Model Accuracy: {accuracy:.4f}")
+print("Classification Report:")
+print(classification_report(y_test, y_pred, target_names=label_encoder.classes_))
+
+# Save Model & Vectorizer
+joblib.dump(xgb_model, "finance_xgb_model.pkl")
+joblib.dump(vectorizer, "tfidf_vectorizer.pkl")
+joblib.dump(label_encoder, "label_encoder.pkl")
+print("Optimized model and vectorizer saved!")
+
+
+import joblib
+import pandas as pd
+import os
+
+# Check the working directory
+print(os.getcwd())
+
+# Load saved model and vectorizer
+try:
+    xgb_model = joblib.load("finance_xgb_model.pkl")
+    vectorizer = joblib.load("tfidf_vectorizer.pkl")
+    label_encoder = joblib.load("label_encoder.pkl")  # Ensure this exists
+except FileNotFoundError as e:
+    print(f"Error: {e}. Make sure all model files exist in the directory.")
+
+# Load new transaction data
+df = pd.read_excel("/content/personal finance data.xlsx")
+
+# Handle missing values
+df["Mode"] = df["Mode"].fillna("unknown").str.lower().str.strip()
+df["Sub category"] = df["Sub category"].fillna("unknown").str.lower().str.strip()
+
+# Combine Mode & Sub category for prediction
+df["text"] = df["Mode"] + " " + df["Sub category"]
+
+# Transform text using the saved vectorizer
+X_new = vectorizer.transform(df["text"])
+
+# Ensure correct shape
+if X_new.shape[1] != len(vectorizer.vocabulary_):
+    print("Warning: Mismatch in vectorizer vocabulary size!")
+
+# Predict categories
+df["Predicted_Category"] = xgb_model.predict(X_new)
+
+# Map numerical labels back to category names
+df["Predicted_Category"] = label_encoder.inverse_transform(df["Predicted_Category"])
+
+# Save predictions
+csv_file_path = "predicted_transactions.csv"
+df.to_csv(csv_file_path, index=False)
+print(f"Predictions saved to {csv_file_path}")
+
+
+from google.colab import files
+files.download("predicted_transactions.csv")
+
+#Budget forecasting
+import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.preprocessing import MinMaxScaler
+from torch.utils.data import Dataset, DataLoader
+
+# Load dataset (Replace with your file)
+df=pd.read_excel("/content/personal finance data.xlsx")
+df = df.sort_values(by="Date / Time")
+df.rename(columns={"Date / Time": "Date"}, inplace=True)
+# Convert to datetime format
+df["Date"] = pd.to_datetime(df["Date"])
+
+# Sort the data by date
+df = df.sort_values(by="Date")
+
+# Aggregate monthly spending
+df["Month"] = df["Date"].dt.to_period("M")
+monthly_spending = df.groupby("Month")["Debit/Credit"].sum().reset_index()
+monthly_spending["Month"] = monthly_spending["Month"].astype(str)
+
+print(monthly_spending.head())
+df["Debit/Credit"] = pd.to_numeric(df["Debit/Credit"], errors="coerce")
+df = df.dropna(subset=["Debit/Credit"])  # Remove invalid entries
+
+
+# Normalize data
+from sklearn.preprocessing import MinMaxScaler
+
+scaler = MinMaxScaler()
+data_scaled = scaler.fit_transform(monthly_spending["Debit/Credit"].values.reshape(-1, 1))
+# Convert data to sequences
+def create_sequences(data, seq_length=3):
+    X, y = [], []
+    for i in range(len(data) - seq_length):
+        X.append(data[i:i+seq_length])
+        y.append(data[i+seq_length])
+    return np.array(X), np.array(y)
+
+seq_length = 3  # Use past 3 months to predict the next month
+X, y = create_sequences(data_scaled, seq_length)
+
+# Convert to PyTorch tensors
+X_tensor = torch.FloatTensor(X)
+y_tensor = torch.FloatTensor(y)
+
+# Define Dataset & DataLoader
+class FinanceDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = X
+        self.y = y
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+dataset = FinanceDataset(X_tensor, y_tensor)
+train_loader = DataLoader(dataset, batch_size=1, shuffle=True)
+
+# Define LSTM Model
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=1, hidden_size=50, num_layers=2):
+        super(LSTMModel, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, 1)
+
+    def forward(self, x):
+        _, (hn, _) = self.lstm(x)
+        out = self.fc(hn[-1])
+        return out
+
+# Initialize model
+model = LSTMModel()
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+# Train model
+epochs = 100
+for epoch in range(epochs):
+    total_loss = 0
+
+import pandas as pd
+
+# Load data
+df = pd.read_excel("/content/personal finance data.xlsx")
+
+# Convert Date column to datetime format
+df.rename(columns={"Date / Time": "Date"}, inplace=True)
+df["Date"] = pd.to_datetime(df["Date"])
+
+# Define 'Month' before filtering
+df["Month"] = df["Date"].dt.to_period("M")
+
+# Split into income & expenses
+income_df = df[df["Income/Expense"] == "Income"]
+expense_df = df[df["Income/Expense"] == "Expense"]
+
+#  Now, 'Month' exists in both subsets
+monthly_income = income_df.groupby("Month")["Debit/Credit"].sum().rename("Total_Income")
+monthly_expense = expense_df.groupby("Month")["Debit/Credit"].sum().rename("Total_Expense")
+
+# Combine into one DataFrame
+monthly_summary = pd.concat([monthly_income, monthly_expense], axis=1).fillna(0)
+
+print(monthly_summary.head())  # Check output
+
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import IsolationForest
+import matplotlib.pyplot as plt
+
+# Load data
+df = pd.read_excel("/content/personal finance data.xlsx")
+
+# Rename and convert Date column
+df.rename(columns={"Date / Time": "Date"}, inplace=True)
+df["Date"] = pd.to_datetime(df["Date"])
+
+# Create 'Month' column for aggregation
+df["Month"] = df["Date"].dt.to_period("M")
+
+# Aggregate monthly spending
+monthly_spending = df.groupby("Month")["Debit/Credit"].sum().reset_index()
+monthly_spending["Month"] = monthly_spending["Month"].astype(str)
+
+# Normalize spending values
+from sklearn.preprocessing import MinMaxScaler
+scaler = MinMaxScaler()
+monthly_spending["Spending_Scaled"] = scaler.fit_transform(monthly_spending[["Debit/Credit"]])
+
+# Apply Isolation Forest for Anomaly Detection
+iso_forest = IsolationForest(contamination=0.1, random_state=42)  # 10% anomalies
+monthly_spending["Anomaly_Score"] = iso_forest.fit_predict(monthly_spending[["Spending_Scaled"]])
+
+#  Flag anomalies (Unusual Spending)
+monthly_spending["Anomaly"] = monthly_spending["Anomaly_Score"].apply(lambda x: "Unusual" if x == -1 else "Normal")
+
+#  Display flagged transactions
+print(monthly_spending[monthly_spending["Anomaly"] == "Unusual"])
+
+#  Plot spending patterns
+plt.figure(figsize=(12, 6))
+plt.plot(monthly_spending["Month"], monthly_spending["Debit/Credit"], marker='o', label="Monthly Spending")
+plt.scatter(
+    monthly_spending[monthly_spending["Anomaly"] == "Unusual"]["Month"],
+    monthly_spending[monthly_spending["Anomaly"] == "Unusual"]["Debit/Credit"],
+    color='red', label="Anomalies", marker='x', s=100
+)
+plt.xlabel("Month")
+plt.ylabel("Total Spending")
+plt.title("Anomaly Detection in Spending")
+plt.xticks(rotation=45)
+plt.legend()
+plt.show()
+
+#  Save results
+monthly_spending.to_csv("anomaly_transactions.csv", index=False)
+print("Anomaly detection results saved in 'anomaly_transactions.csv'")
+
+
+import pandas as pd
+import numpy as np
+
+# Load personal finance data
+df = pd.read_excel("/content/personal finance data.xlsx")
+
+# Rename columns for easier access
+df.rename(columns={"Date / Time": "Date"}, inplace=True)
+df["Date"] = pd.to_datetime(df["Date"])
+df["Month"] = df["Date"].dt.to_period("M")
+
+# Aggregate Monthly Income & Expenses
+income_df = df[df["Income/Expense"] == "Income"]
+expense_df = df[df["Income/Expense"] == "Expense"]
+
+monthly_income = income_df.groupby("Month")["Debit/Credit"].sum().rename("Total_Income")
+monthly_expense = expense_df.groupby("Month")["Debit/Credit"].sum().rename("Total_Expense")
+
+# Combine into single DataFrame
+financial_summary = pd.concat([monthly_income, monthly_expense], axis=1).fillna(0)
+financial_summary["Savings"] = financial_summary["Total_Income"] - financial_summary["Total_Expense"]
+
+print("\n Monthly Financial Summary:")
+print(financial_summary)
+
+# Recommend Savings Strategy
+savings_rate = 0.2  # Target 20% of income for savings
+financial_summary["Recommended_Savings"] = financial_summary["Total_Income"] * savings_rate
+financial_summary["Savings_Gap"] = financial_summary["Recommended_Savings"] - financial_summary["Savings"]
+
+print("\n Suggested Savings Strategy:")
+print(financial_summary[["Savings", "Recommended_Savings", "Savings_Gap"]])
+
+#  Debt Repayment Strategies
+def debt_repayment_plan(debts, method="avalanche"):
+    """
+    Generate a debt repayment plan based on Avalanche or Snowball method.
+    """
+    debts = pd.DataFrame(debts)
+    if method == "avalanche":
+        debts = debts.sort_values("Interest_Rate", ascending=False)  # Highest interest first
+    else:
+        debts = debts.sort_values("Balance", ascending=True)  # Smallest balance first (Snowball)
+
+    print(f"\n {method.capitalize()} Debt Repayment Plan:")
+    print(debts)
+
+# Example debts: [Balance, Interest Rate]
+debts = [
+    {"Debt": "Credit Card", "Balance": 50000, "Interest_Rate": 15},
+    {"Debt": "Car Loan", "Balance": 200000, "Interest_Rate": 8},
+    {"Debt": "Student Loan", "Balance": 300000, "Interest_Rate": 5}
+]
+
+debt_repayment_plan(debts, method="avalanche")
+
+#  Retirement Planning (Compound Interest Projection)
+def retirement_savings(initial_amount, monthly_savings, years, rate=7):
+    """
+    Calculate future retirement savings with compound interest.
+    """
+    total_months = years * 12
+    future_value = initial_amount
+
+    for _ in range(total_months):
+        future_value += monthly_savings
+        future_value *= (1 + rate / 100 / 12)  # Monthly compounding
+
+    return round(future_value, 2)
+
+# Example: Starting ₹1L savings, ₹10k/month for 20 years, 7% return
+retirement_fund = retirement_savings(100000, 10000, 20, rate=7)
+print(f"\n Estimated Retirement Savings in 20 years: ₹{retirement_fund}")
+
+#  Investment Planning Based on Risk Level
+def investment_recommendation(risk_level):
+    """
+    Suggest investment strategies based on risk appetite.
+    """
+    recommendations = {
+        "low": ["Fixed Deposits", "Government Bonds", "Index Funds"],
+        "medium": ["Mutual Funds", "Blue-Chip Stocks", "Gold ETFs"],
+        "high": ["Crypto", "Growth Stocks", "Startups"]
+    }
+    return recommendations.get(risk_level.lower(), ["Consult a financial advisor"])
+
+# Example: Suggest investments for a medium-risk investor
+risk_level = "medium"
+investments = investment_recommendation(risk_level)
+print(f"\n Investment Recommendations for {risk_level.capitalize()} Risk: {investments}")
+
+#  Save financial recommendations
+financial_summary.to_csv("financial_goals.csv", index=False)
+print("\n Financial recommendations saved in 'financial_goals.csv'")
+
